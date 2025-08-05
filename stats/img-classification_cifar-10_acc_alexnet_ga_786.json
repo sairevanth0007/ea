@@ -1,0 +1,12 @@
+[
+    {
+        "accuracy": 0.5585,
+        "batch": 128,
+        "dropout": 0.5,
+        "duration": 9002113103,
+        "lr": 0.01,
+        "momentum": 0.95,
+        "transform": "norm_256_flip",
+        "uid": "74060bc3e1cecae3fdaeb683f52acb3a"
+    }
+]
