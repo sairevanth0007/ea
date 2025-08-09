@@ -10,6 +10,7 @@ from ab.nn.util.Util import uuid4
 import time
 
 # --- Step 1: Import our custom modules ---
+# Ensure AlexNet_evolvable.py has the generate_model_code_string function
 from AlexNet_evolvable import Net, SEARCH_SPACE, generate_model_code_string
 from genetic_algorithm import GeneticAlgorithm
 
@@ -28,7 +29,7 @@ NUM_EPOCHS_PER_EVAL = 5   # Increased for better fitness estimate
 # --- NEW: Paths and Setup ---
 ARCHITECTURE_SAVE_DIR = os.path.join(os.path.dirname(__file__), 'ga_architecture')
 STATS_SAVE_DIR = os.path.join(os.path.dirname(__file__), 'stats')
-CHAMPION_SAVE_PATH = os.path.join(os.path.dirname(__file__), 'champ_alexnet_ga.py')
+CHAMPION_SAVE_PATH = os.path.join(os.path.dirname(__file__), 'ga-champ-alexnet.py') # Updated champion name
 os.makedirs(ARCHITECTURE_SAVE_DIR, exist_ok=True)
 os.makedirs(STATS_SAVE_DIR, exist_ok=True)
 
@@ -76,7 +77,7 @@ if __name__ == "__main__":
              print(f"  - Duplicate architecture detected (checksum: {model_checksum}). Skipping evaluation and saving.")
              return 0.0
 
-        # --- 4. Internal Training/Evaluation ---
+        # --- 4. Internal Training/Evaluation with Per-Epoch Stats Saving ---
         try:
             print(f"  - Evaluating unique architecture (checksum: {model_checksum[:8]}...)")
             start_time = time.time()
@@ -84,54 +85,72 @@ if __name__ == "__main__":
             model = Net(in_shape, out_shape, chromosome, device)
             model.train_setup(prm=chromosome)
 
+            # --- Determine the architecture number and paths (with new naming) ---
+            current_arch_number = architecture_counter
+            # --- CHANGED: Use 'ga-alexnet' prefix and hyphens ---
+            model_base_name = f"ga-alexnet-{current_arch_number}"
+            arch_filename = f"{model_base_name}.py" # ga-alexnet-X.py
+            # --- CHANGED: Use 'ga-alexnet' prefix and hyphens for stats folder ---
+            model_stats_dir_name = f"img-classification_cifar-10_acc_{model_base_name}" # img-classification_cifar-10_acc_ga-alexnet-X
+            model_stats_dir_path = os.path.join(STATS_SAVE_DIR, model_stats_dir_name)
+            os.makedirs(model_stats_dir_path, exist_ok=True) # Create the model's stats subdirectory
+
+            arch_filepath = os.path.join(ARCHITECTURE_SAVE_DIR, arch_filename)
+
+            # Lists to store per-epoch metrics if needed later
+            epoch_accuracies = []
+
+            # --- Training Loop with Per-Epoch Evaluation ---
             for epoch in range(NUM_EPOCHS_PER_EVAL):
+                # Train for one epoch
                 model.learn(train_loader)
 
-            model.eval()
-            correct = 0
-            total = 0
-            with torch.no_grad():
-                for inputs, labels in val_loader:
-                    inputs, labels = inputs.to(device), labels.to(device)
-                    outputs = model(inputs)
-                    _, predicted = torch.max(outputs.data, 1)
-                    total += labels.size(0)
-                    correct += (predicted == labels).sum().item()
-            accuracy = 100 * correct / total
-            duration_ns = int((time.time() - start_time) * 1_000_000_000)
-            print(f"  - Chromosome evaluated. Fitness (Accuracy): {accuracy:.2f}%")
+                # Evaluate after this epoch
+                model.eval()
+                correct = 0
+                total = 0
+                with torch.no_grad():
+                    for inputs, labels in val_loader:
+                        inputs, labels = inputs.to(device), labels.to(device)
+                        outputs = model(inputs)
+                        _, predicted = torch.max(outputs.data, 1)
+                        total += labels.size(0)
+                        correct += (predicted == labels).sum().item()
+                epoch_accuracy = 100 * correct / total
+                epoch_accuracies.append(epoch_accuracy)
+                print(f"    - Epoch {epoch+1}/{NUM_EPOCHS_PER_EVAL} Accuracy: {epoch_accuracy:.2f}%")
 
-            # --- Determine the architecture number ---
-            # Use the global counter for naming
-            current_arch_number = architecture_counter
+                # --- Save Per-Epoch Stats ---
+                epoch_stats_filename = f"{epoch}.json" # Y.json where Y is the epoch number
+                epoch_stats_filepath = os.path.join(model_stats_dir_path, epoch_stats_filename)
 
-            # --- 5. Save Stats to JSON File (with corrected naming) ---
-            stats_filename = f"img-classification_cifar-10_acc_alexnet_ga_{current_arch_number}.json"
-            stats_filepath = os.path.join(STATS_SAVE_DIR, stats_filename)
+                # Prepare epoch stats dictionary
+                epoch_stats_data = {
+                    "accuracy": round(epoch_accuracy / 100.0, 4), # Convert % to fraction and round
+                    "batch": BATCH_SIZE,
+                    "dropout": round(chromosome.get('dropout', 0.0), 4),
+                    "duration": 0, # Duration per epoch is complex to calculate accurately here
+                    "lr": round(chromosome.get('lr', 0.0), 4),
+                    "momentum": round(chromosome.get('momentum', 0.0), 4),
+                    "transform": "norm_256_flip", # Add default transform
+                    "uid": model_checksum,
+                }
 
-            # Prepare stats dictionary (matching the requested format exactly)
-            stats_data = {
-                "accuracy": round(accuracy / 100.0, 4), # Convert % to fraction and round
-                "batch": BATCH_SIZE, # Use the constant BATCH_SIZE
-                "dropout": round(chromosome.get('dropout', 0.0), 4),
-                "duration": duration_ns,
-                "lr": round(chromosome.get('lr', 0.0), 4),
-                "momentum": round(chromosome.get('momentum', 0.0), 4),
-                "transform": "norm_256_flip", # Add default transform as requested
-                "uid": model_checksum,
-            }
+                # Save epoch stats JSON
+                try:
+                    with open(epoch_stats_filepath, 'w') as f:
+                        # Save as a list containing one dictionary
+                        json.dump([epoch_stats_data], f, indent=4)
+                    print(f"      - Epoch {epoch} stats saved to: {epoch_stats_filepath}")
+                except Exception as epoch_json_save_error:
+                    print(f"      - Error saving epoch {epoch} stats to {epoch_stats_filepath}: {epoch_json_save_error}")
 
-            # Save stats JSON (wrapped in a list as requested)
-            try:
-                with open(stats_filepath, 'w') as f:
-                    json.dump([stats_data], f, indent=4)
-                print(f"  - Stats saved to JSON file: {stats_filepath}")
-            except Exception as json_save_error:
-                print(f"  - Error saving stats to JSON file {stats_filepath}: {json_save_error}")
+            # --- Calculate Final Fitness (e.g., last epoch accuracy) ---
+            final_accuracy = epoch_accuracies[-1] if epoch_accuracies else 0.0
+            duration_ns = int((time.time() - start_time) * 1_000_000_000) # Total duration for all epochs
+            print(f"  - Chromosome fully evaluated. Final Fitness (Last Epoch Accuracy): {final_accuracy:.2f}%")
 
-            # --- 6. Save Unique Architecture Code to File (with original naming) ---
-            arch_filename = f"alexnet_ga_{current_arch_number}.py"
-            arch_filepath = os.path.join(ARCHITECTURE_SAVE_DIR, arch_filename)
+            # --- 6. Save Unique Architecture Code to File (with new naming) ---
             try:
                 with open(arch_filepath, 'w') as f:
                     f.write(model_code_string)
@@ -143,7 +162,8 @@ if __name__ == "__main__":
             # --- 7. Add Checksum to Seen Set ---
             seen_checksums.add(model_checksum)
 
-            return accuracy
+            # Return the final fitness score (accuracy of the last epoch)
+            return final_accuracy
 
         except Exception as e:
             print(f"  - Error evaluating chromosome: {e}. Assigning fitness 0.")
@@ -157,16 +177,17 @@ if __name__ == "__main__":
     print("\n--- Starting Genetic Algorithm ---")
 
     # Attempt to resume architecture counter from existing files if needed
-    # This is a simple heuristic: find the highest number in existing alexnet_ga_X.py files
+    # --- CHANGED: Adjusted heuristic for new naming convention (ga-alexnet-X.py) ---
     try:
-        existing_arch_files = [f for f in os.listdir(ARCHITECTURE_SAVE_DIR) if f.startswith("alexnet_ga_") and f.endswith(".py")]
+        existing_arch_files = [f for f in os.listdir(ARCHITECTURE_SAVE_DIR) if f.startswith("ga-alexnet-") and f.endswith(".py")]
         if existing_arch_files:
             numbers = []
             for f in existing_arch_files:
-                parts = f.replace("alexnet_ga_", "").replace(".py", "").split('_') # Handle potential underscores
-                for part in parts:
-                    if part.isdigit():
-                        numbers.append(int(part))
+                 # Extract number from ga-alexnet-X.py
+                 parts = f.replace("ga-alexnet-", "").replace(".py", "").split('-') # Split by hyphen
+                 for part in parts:
+                     if part.isdigit():
+                         numbers.append(int(part))
             if numbers:
                 architecture_counter = max(numbers) + 1
                 print(f"  - Resumed architecture counter from existing files: {architecture_counter}")
@@ -195,9 +216,10 @@ if __name__ == "__main__":
         for gene, value in best_individual['chromosome'].items():
             print(f"    - {gene}: {value}")
 
-        # --- NEW: Save Champion Architecture ---
+        # --- NEW: Save Champion Architecture (with new naming) ---
         try:
             champion_code_string = generate_model_code_string(best_individual['chromosome'], in_shape, out_shape)
+            # CHANGED: Champion filename updated
             with open(CHAMPION_SAVE_PATH, 'w') as f:
                 f.write(champion_code_string)
             print(f"\n--- Champion architecture saved to: {CHAMPION_SAVE_PATH} ---")
